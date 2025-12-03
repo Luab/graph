@@ -1,9 +1,11 @@
 #!/bin/bash
 #
 # Training script for ControlNet with graph conditioning
-# Strategy: PRECOMPUTED (baseline) - uses precomputed [128, 768] embeddings
+# Strategy: LINEAR - trainable nn.Linear expansion layer (~98M params)
 #
-# Usage: ./train_controlnet.sh
+# Requires: new_embeddings_768.pkl (original [768] embeddings)
+#
+# Usage: ./train_controlnet_linear.sh
 #
 
 set -e  # Exit on error
@@ -24,8 +26,9 @@ if [ ! -f "reports_processed.csv" ]; then
     exit 1
 fi
 
-if [ ! -f "new_embeddings_expanded.h5" ]; then
-    echo "Error: new_embeddings_expanded.h5 not found!"
+if [ ! -f "new_embeddings_768.pkl" ]; then
+    echo "Error: new_embeddings_768.pkl not found!"
+    echo "This strategy requires original [768] embeddings."
     exit 1
 fi
 
@@ -37,21 +40,22 @@ fi
 echo "================================"
 echo "ControlNet Training Configuration"
 echo "================================"
-echo "Strategy: precomputed (baseline)"
+echo "Strategy: linear (trainable expansion)"
 echo "CSV path: reports_processed.csv"
-echo "Graph embeddings: new_embeddings_expanded.h5"
+echo "Graph embeddings: new_embeddings_768.pkl"
 echo "Image root: /mnt/data/CheXpert/PNG"
-echo "Output dir: checkpoints/controlnet-precomputed"
+echo "Output dir: checkpoints/controlnet-linear"
+echo "Note: Adds ~98M trainable parameters"
 echo "================================"
 echo ""
 
 # Run training
 python train_controlnet.py \
     --csv_path reports_processed.csv \
-    --graph_embeddings new_embeddings_expanded.h5 \
+    --graph_embeddings new_embeddings_768.pkl \
     --image_root /mnt/data/CheXpert/PNG \
-    --output_dir checkpoints/controlnet-precomputed \
-    --embedding_strategy precomputed \
+    --output_dir checkpoints/controlnet-linear \
+    --embedding_strategy linear \
     --batch_size 16 \
     --num_epochs 10 \
     --learning_rate 1e-4 \
@@ -62,9 +66,10 @@ python train_controlnet.py \
     --log_every_n_steps 10 \
     --save_every_n_epochs 1 \
     --wandb_project controlnet-graph-conditioning \
-    --wandb_run_name precomputed-baseline \
+    --wandb_run_name linear-trainable \
     --seed 42
 
 echo ""
 echo "✅ Training complete!"
+
 

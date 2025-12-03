@@ -26,12 +26,13 @@ class CheXpertGraphDataset(Dataset):
     
     Args:
         csv_path: Path to reports_processed.csv (223,462 samples)
-        embeddings_path: Path to new_embeddings_expanded.h5 (223,462 embeddings)
+        embeddings_path: Path to embeddings file (HDF5 or pickle)
         image_root: Root directory for CheXpert images (/mnt/data/CheXpert/PNG)
         split: "train" or "valid" to filter by path_to_image prefix
         image_size: Target image size for resizing (default: 512 for RadEdit)
         text_field: Column to use for text prompts ("section_impression" or "section_findings")
         max_samples: Optional limit on dataset size (for testing)
+        embedding_dim: "expanded" for [128, 768] or "original" for [768]
     """
     
     def __init__(
@@ -43,10 +44,16 @@ class CheXpertGraphDataset(Dataset):
         image_size: int = 512,
         text_field: str = "section_impression",
         max_samples: Optional[int] = None,
+        embedding_dim: str = "expanded",
     ):
         super().__init__()
         
-        print(f"Loading CheXpertGraphDataset (split={split})...")
+        # Validate embedding_dim
+        valid_dims = ["expanded", "original"]
+        if embedding_dim not in valid_dims:
+            raise ValueError(f"embedding_dim must be one of {valid_dims}, got {embedding_dim}")
+        
+        print(f"Loading CheXpertGraphDataset (split={split}, embedding_dim={embedding_dim})...")
         
         # Load CSV metadata
         self.df = pd.read_csv(csv_path)
@@ -65,11 +72,27 @@ class CheXpertGraphDataset(Dataset):
             self.df = self.df.iloc[:max_samples]
             print(f"  Limited to {max_samples} samples for testing")
         
-        # Open HDF5 file (keep handle open for efficient random access)
-        print(f"  Opening HDF5 embeddings: {embeddings_path}")
-        self.embeddings_file = h5py.File(embeddings_path, 'r')
-        self.embeddings = self.embeddings_file['embeddings']
-        print(f"  HDF5 shape: {self.embeddings.shape}")
+        # Open embeddings file (HDF5 or pickle)
+        print(f"  Opening embeddings: {embeddings_path}")
+        self.embedding_dim = embedding_dim
+        self.embeddings_path = embeddings_path
+        
+        if embeddings_path.endswith('.h5') or embeddings_path.endswith('.hdf5'):
+            # HDF5 file
+            self.embeddings_file = h5py.File(embeddings_path, 'r')
+            self.embeddings = self.embeddings_file['embeddings']
+            print(f"  HDF5 shape: {self.embeddings.shape}")
+            
+            # Validate shape
+            expected_shape = (len(self.embeddings), 128, 768) if embedding_dim == "expanded" else (len(self.embeddings), 768)
+            if self.embeddings.shape != expected_shape:
+                print(f"  Warning: Expected shape {expected_shape} for embedding_dim={embedding_dim}, got {self.embeddings.shape}")
+        else:
+            # Pickle file - load into memory (for [768] embeddings)
+            import pickle
+            self.embeddings = pickle.load(open(embeddings_path, 'rb'))
+            print(f"  Pickle loaded: {self.embeddings.shape}")
+            self.embeddings_file = None  # No file handle to close
         
         # Store configuration
         self.image_root = image_root
@@ -97,7 +120,7 @@ class CheXpertGraphDataset(Dataset):
         Returns:
             dict: {
                 'image': torch.Tensor [3, H, W] in [-1, 1],
-                'graph_embedding': torch.Tensor [128, 768],
+                'graph_embedding': torch.Tensor [128, 768] or [768] depending on embedding_dim,
                 'text_prompt': str,
                 'patient_id': str,
                 'image_path': str,
@@ -105,7 +128,7 @@ class CheXpertGraphDataset(Dataset):
             }
         """
         row = self.df.iloc[idx]
-        original_idx = int(row['original_idx'])  # Original CSV index for HDF5
+        original_idx = int(row['original_idx'])  # Original CSV index for embedding lookup
         
         # 1. Load image
         # Note: CSV has .jpg extension but actual files are .png
@@ -121,10 +144,17 @@ class CheXpertGraphDataset(Dataset):
             # Return black image as fallback
             image_tensor = torch.zeros(3, self.image_size, self.image_size)
         
-        # 2. Load graph embedding from HDF5
-        graph_embedding = torch.from_numpy(
-            self.embeddings[original_idx].astype(np.float32)  # [128, 768]
-        )
+        # 2. Load graph embedding
+        if isinstance(self.embeddings, np.ndarray):
+            # Numpy array (from pickle)
+            graph_embedding = torch.from_numpy(
+                self.embeddings[original_idx].astype(np.float32)
+            )
+        else:
+            # HDF5 dataset
+            graph_embedding = torch.from_numpy(
+                self.embeddings[original_idx].astype(np.float32)
+            )
         
         # 3. Extract text prompt (handle NaN/empty values)
         text_prompt = row[self.text_field]
@@ -162,6 +192,7 @@ def get_dataloaders(
     image_size: int = 512,
     text_field: str = "section_impression",
     max_samples: Optional[int] = None,
+    embedding_dim: str = "expanded",
 ):
     """
     Create train and validation dataloaders.
@@ -170,11 +201,12 @@ def get_dataloaders(
         batch_size: Batch size for training
         num_workers: Number of workers for data loading
         csv_path: Path to reports CSV
-        embeddings_path: Path to HDF5 embeddings
+        embeddings_path: Path to embeddings file (HDF5 or pickle)
         image_root: Root directory for images
         image_size: Target image size
         text_field: Text field to use for prompts
         max_samples: Optional limit on dataset size (for testing)
+        embedding_dim: "expanded" for [128, 768] or "original" for [768]
     
     Returns:
         tuple: (train_loader, val_loader)
@@ -190,6 +222,7 @@ def get_dataloaders(
         image_size=image_size,
         text_field=text_field,
         max_samples=max_samples,
+        embedding_dim=embedding_dim,
     )
     
     val_dataset = CheXpertGraphDataset(
@@ -200,6 +233,7 @@ def get_dataloaders(
         image_size=image_size,
         text_field=text_field,
         max_samples=max_samples // 10 if max_samples else None,  # 10% for val
+        embedding_dim=embedding_dim,
     )
     
     # Create dataloaders

@@ -105,6 +105,9 @@ def parse_args():
                         help="Pretrained RadEdit model name")
     parser.add_argument("--conditioning_scale", type=float, default=1.0,
                         help="ControlNet conditioning scale")
+    parser.add_argument("--embedding_strategy", type=str, default="precomputed",
+                        choices=["precomputed", "linear", "repeat"],
+                        help="Embedding expansion strategy: precomputed (baseline), linear (trainable), repeat (simple)")
     
     # Training arguments
     parser.add_argument("--output_dir", type=str, default="checkpoints/controlnet",
@@ -218,8 +221,8 @@ def main():
     )
     
     # Create ControlNet
-    accelerator.print("Creating GraphControlNet...")
-    controlnet = GraphControlNet(unet)
+    accelerator.print(f"Creating GraphControlNet with {args.embedding_strategy} strategy...")
+    controlnet = GraphControlNet(unet, embedding_strategy=args.embedding_strategy)
     
     if args.gradient_checkpointing:
         controlnet.controlnet.enable_gradient_checkpointing()
@@ -230,16 +233,33 @@ def main():
         prediction_type="epsilon",
     )
     
+    # Map embedding strategy to data format
+    if args.embedding_strategy == "precomputed":
+        # Use expanded embeddings [128, 768]
+        embedding_dim = "expanded"
+        embeddings_path = args.graph_embeddings  # new_embeddings_expanded.h5
+    else:
+        # Use original embeddings [768] for linear and repeat strategies
+        embedding_dim = "original"
+        # Try to find original embeddings path
+        if "expanded" in args.graph_embeddings:
+            embeddings_path = args.graph_embeddings.replace("expanded", "768")
+        else:
+            # Fallback: assume it exists as new_embeddings_768.pkl
+            embeddings_path = args.graph_embeddings.replace(".h5", "_768.pkl")
+        accelerator.print(f"  Using original embeddings: {embeddings_path}")
+    
     # Create dataloaders
     accelerator.print("Loading datasets...")
     train_loader, val_loader = get_dataloaders(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         csv_path=args.csv_path,
-        embeddings_path=args.graph_embeddings,
+        embeddings_path=embeddings_path,
         image_root=args.image_root,
         text_field=args.text_field,
         max_samples=args.max_train_samples,
+        embedding_dim=embedding_dim,
     )
     
     accelerator.print(f"Train samples: {len(train_loader.dataset)}")
@@ -283,6 +303,8 @@ def main():
     
     accelerator.print(f"\n{'='*80}")
     accelerator.print("Training Configuration:")
+    accelerator.print(f"  Embedding strategy: {args.embedding_strategy}")
+    accelerator.print(f"  Embedding dimension: {embedding_dim}")
     accelerator.print(f"  Number of training samples: {len(train_loader.dataset)}")
     accelerator.print(f"  Number of validation samples: {len(val_loader.dataset)}")
     accelerator.print(f"  Batch size per device: {args.batch_size}")
